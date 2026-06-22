@@ -32,9 +32,9 @@ A Python console-based banking application with MySQL database.
 
 \## Requirements
 
-\- Python 3.8+
+\- Python 
 
-\- MySQL / MariaDB
+\- MySQL
 
 \- XAMPP or any MySQL server
 
