@@ -14,12 +14,61 @@ try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass  
+    pass
 
 
 class bankconfig:
     DAILY_WITHDRAWAL_LIMIT = 500_000
     MAX_FAILED_ATTEMPTS    = 5
+
+    # ------------------------------------------------------------------
+    # AIRTIME / DATA PLANS
+    # ------------------------------------------------------------------
+    AIRTIME_NETWORKS = {
+        "1": "MTN",
+        "2": "Airtel",
+        "3": "Glo",
+        "4": "9mobile"
+    }
+
+    DATA_PLANS = {
+        "MTN": [
+            {"id": "1", "desc": "100MB - 1 day",    "price": 100},
+            {"id": "2", "desc": "500MB - 7 days",   "price": 300},
+            {"id": "3", "desc": "1GB   - 30 days",  "price": 500},
+            {"id": "4", "desc": "2GB   - 30 days",  "price": 1000},
+            {"id": "5", "desc": "5GB   - 30 days",  "price": 2000},
+        ],
+        "Airtel": [
+            {"id": "1", "desc": "100MB - 1 day",    "price": 100},
+            {"id": "2", "desc": "750MB - 14 days",  "price": 500},
+            {"id": "3", "desc": "1.5GB - 30 days",  "price": 1000},
+            {"id": "4", "desc": "3GB   - 30 days",  "price": 1500},
+            {"id": "5", "desc": "6GB   - 30 days",  "price": 2500},
+        ],
+        "Glo": [
+            {"id": "1", "desc": "100MB - 1 day",    "price": 50},
+            {"id": "2", "desc": "1GB   - 7 days",   "price": 300},
+            {"id": "3", "desc": "2GB   - 30 days",  "price": 800},
+            {"id": "4", "desc": "5GB   - 30 days",  "price": 1500},
+            {"id": "5", "desc": "10GB  - 30 days",  "price": 2500},
+        ],
+        "9mobile": [
+            {"id": "1", "desc": "150MB - 1 day",    "price": 100},
+            {"id": "2", "desc": "1GB   - 30 days",  "price": 500},
+            {"id": "3", "desc": "2.5GB - 30 days",  "price": 1000},
+            {"id": "4", "desc": "5GB   - 30 days",  "price": 2000},
+            {"id": "5", "desc": "11.5GB - 30 days", "price": 3500},
+        ],
+    }
+
+    BILL_TYPES = {
+        "1": {"name": "DSTV",        "min": 1600,  "max": 50000},
+        "2": {"name": "GOTV",        "min": 800,   "max": 10000},
+        "3": {"name": "Startimes",   "min": 900,   "max": 5000},
+        "4": {"name": "PHCN/NEPA",   "min": 500,   "max": 100000},
+        "5": {"name": "Water Bill",  "min": 500,   "max": 50000},
+    }
 
     def __init__(self, bank_name, database_name="bank_database"):
         self.__bank_name   = bank_name
@@ -85,7 +134,8 @@ class bankconfig:
             CREATE TABLE IF NOT EXISTS transactions (
                 id            INT AUTO_INCREMENT PRIMARY KEY,
                 user_id       INT          NOT NULL,
-                type          ENUM('deposit','withdrawal','transfer_in','transfer_out') NOT NULL,
+                type          ENUM('deposit','withdrawal','transfer_in','transfer_out',
+                                   'airtime','data','bill','qr_payment','qr_receive') NOT NULL,
                 amount        DECIMAL(15,2) NOT NULL,
                 balance_after DECIMAL(15,2) NOT NULL,
                 description   VARCHAR(255) DEFAULT NULL,
@@ -133,24 +183,35 @@ class bankconfig:
                     ON DELETE CASCADE ON UPDATE CASCADE
             ) ENGINE=InnoDB
         """
+        qr_codes_table = """
+            CREATE TABLE IF NOT EXISTS qr_codes (
+                id         INT AUTO_INCREMENT PRIMARY KEY,
+                user_id    INT NOT NULL,
+                qr_token   VARCHAR(32) UNIQUE NOT NULL,
+                amount     DECIMAL(15,2) DEFAULT NULL,
+                used       TINYINT(1) NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT fk_qr_user
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                    ON DELETE CASCADE ON UPDATE CASCADE
+            ) ENGINE=InnoDB
+        """
         for stmt in [users_table, transactions_table, sessions_table,
-                     otps_table, notifications_table]:
+                     otps_table, notifications_table, qr_codes_table]:
             self.mycursor.execute(stmt)
 
     # ------------------------------------------------------------------
-    # BANK NAME
+    # GET BANK NAME
     # ------------------------------------------------------------------
     def get_bank_name(self):
         return self.__bank_name
 
     def hash_password(self, password):
-        """PBKDF2-HMAC-SHA256 with random 32-byte salt, 260k iterations."""
         salt = os.urandom(32)
         key  = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 260_000)
         return (salt + key).hex()
 
     def check_password(self, stored_hex, provided):
-        """Constant-time check. Also accepts legacy SHA-256 hashes."""
         try:
             if len(stored_hex) == 64:
                 return secrets.compare_digest(
@@ -171,7 +232,6 @@ class bankconfig:
         return re.match(r"^\+?[0-9]{10,15}$", phone) is not None
 
     def generate_account_number(self):
-        """Unique 10-digit account number via cryptographically secure RNG."""
         while True:
             number = "".join([str(secrets.randbelow(10)) for _ in range(10)])
             self.mycursor.execute(
@@ -181,7 +241,6 @@ class bankconfig:
                 return number
 
     def generate_reference(self):
-        """Unique transaction reference."""
         while True:
             ref = "TXN" + secrets.token_hex(10).upper()
             self.mycursor.execute(
@@ -210,16 +269,20 @@ class bankconfig:
         secrets.SystemRandom().shuffle(chars)
         return "".join(chars)
 
+    def generate_qr_token(self):
+        """Generate a unique QR payment token."""
+        while True:
+            token = secrets.token_hex(16).upper()
+            self.mycursor.execute(
+                "SELECT id FROM qr_codes WHERE qr_token = %s", (token,)
+            )
+            if not self.mycursor.fetchone():
+                return token
+
     # ------------------------------------------------------------------
     # EMAIL
     # ------------------------------------------------------------------
     def _smtp_send(self, receiver_email, subject, body, silent=False):
-        """
-        Core SMTP send. Supports both:
-          - Port 465 : SMTP_SSL  (implicit TLS)
-          - Port 587 : SMTP + STARTTLS
-        Reads config from environment / .env file.
-        """
         smtp_host     = "smtp.gmail.com"
         smtp_port     = 465
         smtp_user     = "agboolataiwo385@gmail.com"
@@ -233,18 +296,9 @@ class bankconfig:
         msg.set_content(body)
 
         try:
-            if smtp_port == 465:
-                with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10) as server:
-                    server.login(smtp_user, smtp_password)
-                    server.send_message(msg)
-            else:
-                
-                with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
-                    server.ehlo()
-                    server.starttls()
-                    server.ehlo()
-                    server.login(smtp_user, smtp_password)
-                    server.send_message(msg)
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10) as server:
+                server.login(smtp_user, smtp_password)
+                server.send_message(msg)
             return {"status": True, "message": "Email sent successfully"}
         except Exception as e:
             if not silent:
@@ -254,14 +308,9 @@ class bankconfig:
             return {"status": False, "message": f"Email failed: {e}"}
 
     def send_email(self, receiver_email, subject, body):
-        """Blocking send — used for OTP emails so we can return the result."""
         return self._smtp_send(receiver_email, subject, body, silent=False)
 
     def send_alert_email(self, email, message):
-        """
-        Non-blocking fire-and-forget alert.
-        Runs in a daemon thread so SMTP failures never stall the app.
-        """
         subject = f"{self.get_bank_name()} — Alert"
         thread  = threading.Thread(
             target=self._smtp_send,
@@ -411,7 +460,7 @@ class bankconfig:
         result = self.send_otp_email(email, otp, "email verification")
         if not result["status"]:
             return {"status": False, "message": result["message"], "otp": otp}
-        return {"status": True, "message": "Verification code sent to your email", "otp": otp}
+        return {"status": True, "message": "Verification code sent to your email", "otp": None}
 
     def verify_email(self, user_id, otp):
         if not self.verify_otp(user_id, otp, "email_verification"):
@@ -451,7 +500,6 @@ class bankconfig:
                 return {"status": False,
                         "message": f"Invalid email or password. {max(remaining, 0)} attempt(s) remaining."}
 
-            # Upgrade legacy SHA-256 hash to PBKDF2 on first successful login
             if len(user["password"]) == 64:
                 self.mycursor.execute(
                     "UPDATE users SET password=%s WHERE id=%s",
@@ -803,6 +851,315 @@ class bankconfig:
             )
             self.add_notification(sender_id, debit_msg)
             self.add_notification(receiver["id"], credit_msg)
+            self.send_alert_email(sender["email"], debit_msg)
+            self.send_alert_email(receiver["email"], credit_msg)
+
+            return {
+                "status": True,
+                "message": debit_msg,
+                "sender_balance": sender_new_bal,
+                "reference": ref
+            }
+        except Exception as e:
+            self.conn.rollback()
+            return {"status": False, "message": str(e)}
+        finally:
+            self.conn.autocommit = True
+
+    # ------------------------------------------------------------------
+    # AIRTIME PURCHASE
+    # ------------------------------------------------------------------
+    def buy_airtime(self, user_id, network, phone_number, amount):
+        if amount <= 0:
+            return {"status": False, "message": "Amount must be greater than zero"}
+        if amount < 50:
+            return {"status": False, "message": "Minimum airtime purchase is \u20a650"}
+        if amount > 50_000:
+            return {"status": False, "message": "Maximum airtime purchase is \u20a650,000"}
+        if network not in self.AIRTIME_NETWORKS.values():
+            return {"status": False, "message": "Invalid network selected"}
+        try:
+            self.conn.autocommit = False
+            self.mycursor.execute(
+                "SELECT balance, status, email FROM users WHERE id=%s", (user_id,)
+            )
+            user = self.mycursor.fetchone()
+            if not user:
+                self.conn.rollback()
+                return {"status": False, "message": "User not found"}
+            if user["status"] != "active":
+                self.conn.rollback()
+                return {"status": False, "message": "Account is not active"}
+            if float(user["balance"]) < amount:
+                self.conn.rollback()
+                return {"status": False, "message": "Insufficient balance"}
+
+            new_balance = float(user["balance"]) - amount
+            ref         = self.generate_reference()
+            self.mycursor.execute(
+                "UPDATE users SET balance=%s WHERE id=%s", (new_balance, user_id)
+            )
+            self.mycursor.execute(
+                """INSERT INTO transactions(user_id,type,amount,balance_after,description,reference)
+                   VALUES(%s,'airtime',%s,%s,%s,%s)""",
+                (user_id, amount, new_balance,
+                 f"{network} Airtime \u2014 {phone_number}", ref)
+            )
+            self.conn.commit()
+            msg = (
+                f"Airtime Purchase\n"
+                f"Network: {network}\n"
+                f"Phone  : {phone_number}\n"
+                f"Amount : \u20a6{amount:,.2f}\n"
+                f"Balance: \u20a6{new_balance:,.2f}\n"
+                f"Ref    : {ref}\n"
+                f"Date   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            self.add_notification(user_id, msg)
+            self.send_alert_email(user["email"], msg)
+            return {"status": True, "message": msg, "balance": new_balance, "reference": ref}
+        except Exception as e:
+            self.conn.rollback()
+            return {"status": False, "message": str(e)}
+        finally:
+            self.conn.autocommit = True
+
+    # ------------------------------------------------------------------
+    # DATA PURCHASE
+    # ------------------------------------------------------------------
+    def buy_data(self, user_id, network, phone_number, plan):
+        """plan is a dict: {id, desc, price}"""
+        amount = plan["price"]
+        try:
+            self.conn.autocommit = False
+            self.mycursor.execute(
+                "SELECT balance, status, email FROM users WHERE id=%s", (user_id,)
+            )
+            user = self.mycursor.fetchone()
+            if not user:
+                self.conn.rollback()
+                return {"status": False, "message": "User not found"}
+            if user["status"] != "active":
+                self.conn.rollback()
+                return {"status": False, "message": "Account is not active"}
+            if float(user["balance"]) < amount:
+                self.conn.rollback()
+                return {"status": False, "message": "Insufficient balance"}
+
+            new_balance = float(user["balance"]) - amount
+            ref         = self.generate_reference()
+            self.mycursor.execute(
+                "UPDATE users SET balance=%s WHERE id=%s", (new_balance, user_id)
+            )
+            self.mycursor.execute(
+                """INSERT INTO transactions(user_id,type,amount,balance_after,description,reference)
+                   VALUES(%s,'data',%s,%s,%s,%s)""",
+                (user_id, amount, new_balance,
+                 f"{network} Data {plan['desc']} \u2014 {phone_number}", ref)
+            )
+            self.conn.commit()
+            msg = (
+                f"Data Purchase\n"
+                f"Network: {network}\n"
+                f"Plan   : {plan['desc']}\n"
+                f"Phone  : {phone_number}\n"
+                f"Amount : \u20a6{amount:,.2f}\n"
+                f"Balance: \u20a6{new_balance:,.2f}\n"
+                f"Ref    : {ref}\n"
+                f"Date   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            self.add_notification(user_id, msg)
+            self.send_alert_email(user["email"], msg)
+            return {"status": True, "message": msg, "balance": new_balance, "reference": ref}
+        except Exception as e:
+            self.conn.rollback()
+            return {"status": False, "message": str(e)}
+        finally:
+            self.conn.autocommit = True
+
+    # ------------------------------------------------------------------
+    # BILL PAYMENT
+    # ------------------------------------------------------------------
+    def pay_bill(self, user_id, bill_type, smart_card_number, amount):
+        if amount <= 0:
+            return {"status": False, "message": "Amount must be greater than zero"}
+        bill = self.BILL_TYPES.get(bill_type)
+        if not bill:
+            return {"status": False, "message": "Invalid bill type"}
+        if amount < bill["min"]:
+            return {"status": False,
+                    "message": f"Minimum payment for {bill['name']} is \u20a6{bill['min']:,.2f}"}
+        if amount > bill["max"]:
+            return {"status": False,
+                    "message": f"Maximum payment for {bill['name']} is \u20a6{bill['max']:,.2f}"}
+        try:
+            self.conn.autocommit = False
+            self.mycursor.execute(
+                "SELECT balance, status, email FROM users WHERE id=%s", (user_id,)
+            )
+            user = self.mycursor.fetchone()
+            if not user:
+                self.conn.rollback()
+                return {"status": False, "message": "User not found"}
+            if user["status"] != "active":
+                self.conn.rollback()
+                return {"status": False, "message": "Account is not active"}
+            if float(user["balance"]) < amount:
+                self.conn.rollback()
+                return {"status": False, "message": "Insufficient balance"}
+
+            new_balance = float(user["balance"]) - amount
+            ref         = self.generate_reference()
+            self.mycursor.execute(
+                "UPDATE users SET balance=%s WHERE id=%s", (new_balance, user_id)
+            )
+            self.mycursor.execute(
+                """INSERT INTO transactions(user_id,type,amount,balance_after,description,reference)
+                   VALUES(%s,'bill',%s,%s,%s,%s)""",
+                (user_id, amount, new_balance,
+                 f"{bill['name']} Payment \u2014 {smart_card_number}", ref)
+            )
+            self.conn.commit()
+            msg = (
+                f"Bill Payment\n"
+                f"Biller : {bill['name']}\n"
+                f"Card No: {smart_card_number}\n"
+                f"Amount : \u20a6{amount:,.2f}\n"
+                f"Balance: \u20a6{new_balance:,.2f}\n"
+                f"Ref    : {ref}\n"
+                f"Date   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            self.add_notification(user_id, msg)
+            self.send_alert_email(user["email"], msg)
+            return {"status": True, "message": msg, "balance": new_balance, "reference": ref}
+        except Exception as e:
+            self.conn.rollback()
+            return {"status": False, "message": str(e)}
+        finally:
+            self.conn.autocommit = True
+
+    # ------------------------------------------------------------------
+    # QR PAYMENTS
+    # ------------------------------------------------------------------
+    def generate_qr(self, user_id, amount=None):
+        """Generate a QR token for receiving payment."""
+        self.mycursor.execute(
+            "SELECT status FROM users WHERE id=%s", (user_id,)
+        )
+        user = self.mycursor.fetchone()
+        if not user or user["status"] != "active":
+            return {"status": False, "message": "Account is not active"}
+
+        token = self.generate_qr_token()
+        self.mycursor.execute(
+            "INSERT INTO qr_codes(user_id, qr_token, amount) VALUES(%s,%s,%s)",
+            (user_id, token, amount)
+        )
+        msg = (
+            f"\n  ============================\n"
+            f"  QR PAYMENT CODE\n"
+            f"  ============================\n"
+            f"  Token : {token}\n"
+        )
+        if amount:
+            msg += f"  Amount: \u20a6{amount:,.2f}\n"
+        msg += (
+            f"  ============================\n"
+            f"  Share this token with the sender.\n"
+            f"  It can only be used once.\n"
+        )
+        return {"status": True, "message": msg, "token": token}
+
+    def pay_via_qr(self, sender_id, qr_token, amount=None):
+        """Pay someone using their QR token."""
+        try:
+            self.conn.autocommit = False
+
+            # Validate QR token
+            self.mycursor.execute(
+                "SELECT * FROM qr_codes WHERE qr_token=%s AND used=0", (qr_token,)
+            )
+            qr = self.mycursor.fetchone()
+            if not qr:
+                self.conn.rollback()
+                return {"status": False, "message": "Invalid or already used QR code"}
+
+            # Use amount from QR if fixed, else use provided amount
+            pay_amount = float(qr["amount"]) if qr["amount"] else amount
+            if not pay_amount or pay_amount <= 0:
+                self.conn.rollback()
+                return {"status": False, "message": "Invalid payment amount"}
+
+            receiver_id = qr["user_id"]
+            if receiver_id == sender_id:
+                self.conn.rollback()
+                return {"status": False, "message": "Cannot pay yourself"}
+
+            # Get sender
+            self.mycursor.execute(
+                "SELECT balance, status, fullname, email FROM users WHERE id=%s", (sender_id,)
+            )
+            sender = self.mycursor.fetchone()
+            if not sender or sender["status"] != "active":
+                self.conn.rollback()
+                return {"status": False, "message": "Your account is not active"}
+            if float(sender["balance"]) < pay_amount:
+                self.conn.rollback()
+                return {"status": False, "message": "Insufficient balance"}
+
+            # Get receiver
+            self.mycursor.execute(
+                "SELECT balance, fullname, email FROM users WHERE id=%s", (receiver_id,)
+            )
+            receiver = self.mycursor.fetchone()
+            if not receiver:
+                self.conn.rollback()
+                return {"status": False, "message": "Receiver not found"}
+
+            sender_new_bal   = float(sender["balance"])   - pay_amount
+            receiver_new_bal = float(receiver["balance"]) + pay_amount
+            ref = self.generate_reference()
+
+            self.mycursor.execute(
+                "UPDATE users SET balance=%s WHERE id=%s", (sender_new_bal, sender_id)
+            )
+            self.mycursor.execute(
+                "UPDATE users SET balance=%s WHERE id=%s", (receiver_new_bal, receiver_id)
+            )
+            self.mycursor.execute(
+                """INSERT INTO transactions(user_id,type,amount,balance_after,description,reference)
+                   VALUES(%s,'qr_payment',%s,%s,%s,%s)""",
+                (sender_id, pay_amount, sender_new_bal,
+                 f"QR Payment to {receiver['fullname']}", ref)
+            )
+            self.mycursor.execute(
+                """INSERT INTO transactions(user_id,type,amount,balance_after,description,reference)
+                   VALUES(%s,'qr_receive',%s,%s,%s,%s)""",
+                (receiver_id, pay_amount, receiver_new_bal,
+                 f"QR Payment from {sender['fullname']}", "QR-" + ref)
+            )
+            # Mark QR as used
+            self.mycursor.execute(
+                "UPDATE qr_codes SET used=1 WHERE qr_token=%s", (qr_token,)
+            )
+            self.conn.commit()
+
+            debit_msg = (
+                f"QR Payment Sent\n"
+                f"To     : {receiver['fullname']}\n"
+                f"Amount : \u20a6{pay_amount:,.2f}\n"
+                f"Balance: \u20a6{sender_new_bal:,.2f}\n"
+                f"Ref    : {ref}"
+            )
+            credit_msg = (
+                f"QR Payment Received\n"
+                f"From   : {sender['fullname']}\n"
+                f"Amount : \u20a6{pay_amount:,.2f}\n"
+                f"Balance: \u20a6{receiver_new_bal:,.2f}\n"
+                f"Ref    : {ref}"
+            )
+            self.add_notification(sender_id, debit_msg)
+            self.add_notification(receiver_id, credit_msg)
             self.send_alert_email(sender["email"], debit_msg)
             self.send_alert_email(receiver["email"], credit_msg)
 

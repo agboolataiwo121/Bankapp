@@ -86,13 +86,10 @@ class bankapp(bankconfig):
         user = result["data"]
         print(result["message"])
 
-        # 2FA check
         if user["two_fa_enabled"]:
             print("Two-factor authentication is enabled. Sending OTP...")
             fa = self.send_2fa_otp(user["id"], user["email"])
             print(fa["message"])
-            if fa.get("otp"):
-                print(f"[DEV] 2FA OTP: {fa['otp']}")
             otp = input("Enter 2FA code: ").strip()
             vr  = self.verify_2fa(user["id"], otp)
             if not vr["status"]:
@@ -112,7 +109,6 @@ class bankapp(bankconfig):
             f"Login successful on {self._now_str()}. "
             "If this wasn't you, change your password immediately."
         )
-        
         self.send_alert_email(
             user["email"],
             f"Login Alert: Your account was accessed on {self._now_str()}."
@@ -166,7 +162,6 @@ class bankapp(bankconfig):
             return
         print(result["message"])
         user = result["user"]
-        
 
         otp     = input("Enter OTP        : ").strip()
         new_pw  = input("New password     : ")
@@ -187,29 +182,219 @@ class bankapp(bankconfig):
              Type: {user['account_type'].title()}
              Bal : \u20a6{float(user['balance']):,.2f}
             ============================
-            1. Deposit
-            2. Withdraw
-            3. Transfer
-            4. Transaction history
-            5. Account details
-            6. Notifications
-            7. Change password
-            8. Security settings
-            9. Logout
+            1.  Deposit
+            2.  Withdraw
+            3.  Transfer
+            4.  Mobile Banking
+            5.  Transaction history
+            6.  Account details
+            7.  Notifications
+            8.  Change password
+            9.  Security settings
+            10. Logout
             """)
             choice = input("Enter choice: ").strip()
-            if   choice == "1": self.deposit_flow(user)
-            elif choice == "2": self.withdraw_flow(user)
-            elif choice == "3": self.transfer_flow(user)
-            elif choice == "4": self.show_transaction_history(user)
-            elif choice == "5": self.account_dashboard(user)
-            elif choice == "6": self.show_notifications(user)
-            elif choice == "7":
+            if   choice == "1":  self.deposit_flow(user)
+            elif choice == "2":  self.withdraw_flow(user)
+            elif choice == "3":  self.transfer_flow(user)
+            elif choice == "4":  self.mobile_banking_menu(user)
+            elif choice == "5":  self.show_transaction_history(user)
+            elif choice == "6":  self.account_dashboard(user)
+            elif choice == "7":  self.show_notifications(user)
+            elif choice == "8":
                 if self.change_password_flow(user):
-                    break  # password changed → force logout
-            elif choice == "8": self.security_settings(user)
-            elif choice == "9": break
+                    break
+            elif choice == "9":  self.security_settings(user)
+            elif choice == "10": break
             else: print("Invalid choice.")
+
+    # ==================================================================
+    # MOBILE BANKING MENU
+    # ==================================================================
+    def mobile_banking_menu(self, user):
+        while True:
+            print(f"""
+            --- Mobile Banking ---
+            1. Airtime Purchase
+            2. Data Purchase
+            3. Bill Payment
+            4. QR Payment
+            5. Back
+            """)
+            choice = input("Enter choice: ").strip()
+            if   choice == "1": self.airtime_flow(user)
+            elif choice == "2": self.data_flow(user)
+            elif choice == "3": self.bill_payment_flow(user)
+            elif choice == "4": self.qr_payment_menu(user)
+            elif choice == "5": break
+            else: print("Invalid choice.")
+
+    # ==================================================================
+    # AIRTIME PURCHASE
+    # ==================================================================
+    def airtime_flow(self, user):
+        print("\n--- Airtime Purchase ---")
+        print("Networks:")
+        for key, name in self.AIRTIME_NETWORKS.items():
+            print(f"  {key}. {name}")
+        net_choice = input("Select network: ").strip()
+        network    = self.AIRTIME_NETWORKS.get(net_choice)
+        if not network:
+            print("Invalid network.")
+            return
+
+        phone  = input("Phone number   : ").strip()
+        if not self.validate_phone(phone):
+            print("Invalid phone number.")
+            return
+
+        amount = self._get_amount_input("Amount         : \u20a6")
+        if amount is None:
+            return
+
+        print(f"\nYou are about to buy \u20a6{amount:,.0f} {network} airtime for {phone}")
+        if input("Confirm? yes/no: ").strip().lower() != "yes":
+            print("Cancelled.")
+            return
+
+        result = self.buy_airtime(user["id"], network, phone, amount)
+        print(result["message"])
+
+    # ==================================================================
+    # DATA PURCHASE
+    # ==================================================================
+    def data_flow(self, user):
+        print("\n--- Data Purchase ---")
+        print("Networks:")
+        for key, name in self.AIRTIME_NETWORKS.items():
+            print(f"  {key}. {name}")
+        net_choice = input("Select network: ").strip()
+        network    = self.AIRTIME_NETWORKS.get(net_choice)
+        if not network:
+            print("Invalid network.")
+            return
+
+        phone = input("Phone number  : ").strip()
+        if not self.validate_phone(phone):
+            print("Invalid phone number.")
+            return
+
+        plans = self.DATA_PLANS[network]
+        print(f"\n{network} Data Plans:")
+        for p in plans:
+            print(f"  {p['id']}. {p['desc']:<20} \u20a6{p['price']:,.2f}")
+
+        plan_choice = input("Select plan: ").strip()
+        plan        = next((p for p in plans if p["id"] == plan_choice), None)
+        if not plan:
+            print("Invalid plan.")
+            return
+
+        print(f"\nYou are about to buy {plan['desc']} for {phone} at \u20a6{plan['price']:,.2f}")
+        if input("Confirm? yes/no: ").strip().lower() != "yes":
+            print("Cancelled.")
+            return
+
+        result = self.buy_data(user["id"], network, phone, plan)
+        print(result["message"])
+
+    # ==================================================================
+    # BILL PAYMENT
+    # ==================================================================
+    def bill_payment_flow(self, user):
+        print("\n--- Bill Payment ---")
+        print("Billers:")
+        for key, bill in self.BILL_TYPES.items():
+            print(f"  {key}. {bill['name']:<15} "
+                  f"Min: \u20a6{bill['min']:,.0f}  Max: \u20a6{bill['max']:,.0f}")
+
+        bill_choice = input("Select biller: ").strip()
+        if bill_choice not in self.BILL_TYPES:
+            print("Invalid biller.")
+            return
+
+        bill        = self.BILL_TYPES[bill_choice]
+        smart_card  = input(f"Smart card / Meter number: ").strip()
+        if not smart_card:
+            print("Smart card number is required.")
+            return
+
+        amount = self._get_amount_input(f"Amount (\u20a6{bill['min']:,.0f} - \u20a6{bill['max']:,.0f}): \u20a6")
+        if amount is None:
+            return
+
+        print(f"\nYou are about to pay \u20a6{amount:,.2f} to {bill['name']} for {smart_card}")
+        if input("Confirm? yes/no: ").strip().lower() != "yes":
+            print("Cancelled.")
+            return
+
+        result = self.pay_bill(user["id"], bill_choice, smart_card, amount)
+        print(result["message"])
+
+    # ==================================================================
+    # QR PAYMENT
+    # ==================================================================
+    def qr_payment_menu(self, user):
+        while True:
+            print(f"""
+            --- QR Payment ---
+            1. Generate my QR code (receive money)
+            2. Pay via QR code (send money)
+            3. Back
+            """)
+            choice = input("Enter choice: ").strip()
+            if   choice == "1": self.generate_qr_flow(user)
+            elif choice == "2": self.pay_qr_flow(user)
+            elif choice == "3": break
+            else: print("Invalid choice.")
+
+    def generate_qr_flow(self, user):
+        print("\n--- Generate QR Code ---")
+        raw    = input("Fixed amount? (Enter to skip): ").strip()
+        amount = None
+        if raw:
+            try:
+                amount = float(raw)
+                if amount <= 0:
+                    print("Amount must be greater than zero.")
+                    return
+            except ValueError:
+                print("Invalid amount.")
+                return
+
+        result = self.generate_qr(user["id"], amount)
+        print(result["message"])
+
+    def pay_qr_flow(self, user):
+        print("\n--- Pay via QR Code ---")
+        token = input("Enter QR token: ").strip().upper()
+        if not token:
+            print("Token is required.")
+            return
+
+        # Check if QR has a fixed amount
+        self.mycursor.execute(
+            "SELECT amount FROM qr_codes WHERE qr_token=%s AND used=0", (token,)
+        )
+        qr = self.mycursor.fetchone()
+        if not qr:
+            print("Invalid or already used QR code.")
+            return
+
+        amount = None
+        if qr["amount"]:
+            print(f"Fixed amount: \u20a6{float(qr['amount']):,.2f}")
+        else:
+            amount = self._get_amount_input("Amount to pay: \u20a6")
+            if amount is None:
+                return
+
+        if input("Confirm payment? yes/no: ").strip().lower() != "yes":
+            print("Cancelled.")
+            return
+
+        result = self.pay_via_qr(user["id"], token, amount)
+        print(result["message"])
 
     # ==================================================================
     # DEPOSIT
@@ -286,7 +471,6 @@ class bankapp(bankconfig):
         self.store_otp(user["id"], otp_val, "transfer")
         er = self.send_otp_email(user["email"], otp_val, "transfer confirmation")
         print(er["message"])
-        
 
         entered = input("Enter OTP: ").strip()
         if not self.verify_otp(user["id"], entered, "transfer"):
@@ -342,7 +526,7 @@ class bankapp(bankconfig):
             print("  No transactions yet.")
         else:
             for t in txns:
-                sign = "+" if t["type"] in ("deposit", "transfer_in") else "-"
+                sign = "+" if t["type"] in ("deposit", "transfer_in", "qr_receive") else "-"
                 print(f"  {sign}\u20a6{float(t['amount']):,.2f}  {t['type']}  {str(t['created_at'])[:10]}")
 
     # ==================================================================
@@ -364,7 +548,6 @@ class bankapp(bankconfig):
     # CHANGE PASSWORD
     # ==================================================================
     def change_password_flow(self, user):
-        """Returns True if password changed (caller should exit dashboard)."""
         print("\n--- Change Password ---")
         old_pw  = input("Current password : ")
         new_pw  = input("New password     : ")
